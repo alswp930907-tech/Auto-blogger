@@ -1,3 +1,4 @@
+# 1번째
 # main.py
 # 1) GDELT에서 최신 뉴스 수집
 # 2) OpenAI로 영어 SEO 기사 작성 (쉬운 단어/짧은 문장/<=2000자 plain-text)
