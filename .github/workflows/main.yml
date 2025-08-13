@@ -1,15 +1,19 @@
-permissions:
-  contents: write
+name: Auto Blogger
 
-name: Auto Blogger (diagnostic)
-
+# 수동 실행 + (원하면) 예약 실행
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'   # 매일 00:00 UTC
+    - cron: '0 0 * * *'   # 매일 00:00 UTC (한국 09:00)
 
+# GitHub 토큰 권한 (필수)
 permissions:
   contents: write
+
+# 동시에 여러 번 돌지 않도록 (선택)
+concurrency:
+  group: auto-blogger
+  cancel-in-progress: true
 
 jobs:
   run-script:
@@ -26,28 +30,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # requirements.txt가 있든 없든 필요한 것 바로 설치
-          pip install "openai>=1.30.0" requests
-
-      # 🔎 환경변수 존재 여부를 먼저 검사(값은 출력 안 함)
-      - name: Sanity check env
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-          BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
-          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
-        run: |
-          check() { test -n "$2" && echo "$1: OK" || { echo "::error::$1 MISSING"; exit 1; }; }
-          check OPENAI_API_KEY "${OPENAI_API_KEY}"
-          check CLIENT_ID "${CLIENT_ID}"
-          check CLIENT_SECRET "${CLIENT_SECRET}"
-          check BLOGGER_REFRESH_TOKEN "${BLOGGER_REFRESH_TOKEN}"
-          check BLOGGER_BLOG_ID "${BLOGGER_BLOG_ID}"
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # requirements.txt 없을 때 기본 패키지
+            pip install google-api-python-client google-auth google-auth-oauthlib requests
+          fi
 
       - name: Run script
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}               # (있으면 사용)
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
