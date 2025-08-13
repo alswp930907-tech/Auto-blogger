@@ -1,7 +1,9 @@
-name: Auto Blogger (diagnostic)
+name: Auto Blogger
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # 수동 실행 버튼
+  # schedule:               # 매일 00:00 UTC 자동 실행 (원하면 주석 해제)
+  #   - cron: '0 0 * * *'
 
 permissions:
   contents: write
@@ -40,3 +42,4 @@ jobs:
         with:
           name: html-output
           path: output/*.html
+          if-no-files-found: ignore
