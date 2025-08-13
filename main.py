@@ -1,164 +1,167 @@
-# 1번째
 # main.py
-# 1) GDELT에서 최신 뉴스 수집
-# 2) OpenAI로 영어 SEO 기사 작성 (쉬운 단어/짧은 문장/<=2000자 plain-text)
-# 3) 썸네일 1장 생성 (gpt-image-1)
-# 4) 완성 HTML을 output/YYYY-MM-DD-slug.html 저장
+# - OpenAI로 영어 SEO 기사 작성 (미국 주식, 쉬운 영어, ~2000자)
+# - 히어로 이미지는 무료 placeholder URL 사용(저작권 안전)
+# - output/ 에 HTML 저장 + Blogger API로 바로 게시
 
-import os, json, re, time, pathlib, datetime as dt
+import os, json, time, pathlib, datetime as dt, re, random
 import requests
 from openai import OpenAI
 
-# ===== 설정 =====
-QUERY = "korea economic growth"   # 원하는 검색어(영문 2~3단어 이상 권장)
-MAX_RECORDS = 10                  # 기사 개수(1~50)
-CHAR_LIMIT = 2000                 # 본문 plain-text 최대 글자수
-MODEL_TEXT = "gpt-4o-mini"
-MODEL_IMAGE = "gpt-image-1"
-OUT_DIR = pathlib.Path("output")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# ========= 환경변수(Secrets) =========
+OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY")
+CLIENT_ID           = os.environ.get("CLIENT_ID")
+CLIENT_SECRET       = os.environ.get("CLIENT_SECRET")
+REFRESH_TOKEN       = os.environ.get("BLOGGER_REFRESH_TOKEN")
+BLOG_ID             = os.environ.get("BLOGGER_BLOG_ID")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise SystemExit("❌ OPENAI_API_KEY env var missing. Put it in GitHub Secrets.")
+def require_env(name, val):
+    if not val:
+        raise SystemExit(f"❌ Missing environment variable: {name}")
+for k, v in {
+    "OPENAI_API_KEY": OPENAI_API_KEY,
+    "CLIENT_ID": CLIENT_ID,
+    "CLIENT_SECRET": CLIENT_SECRET,
+    "BLOGGER_REFRESH_TOKEN": REFRESH_TOKEN,
+    "BLOGGER_BLOG_ID": BLOG_ID,
+}.items():
+    require_env(k, v)
+
+# ========= 설정 =========
+MODEL_TEXT  = "gpt-4o-mini"     # 텍스트 전용
+OUT_DIR = pathlib.Path("output"); OUT_DIR.mkdir(exist_ok=True)
+TARGET_MIN, TARGET_MAX = 1500, 2000  # 본문(평문) 길이 목표(문자 수)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# ===== 유틸 =====
-def fetch_gdelt(query: str, maxrecords: int = 10):
-    params = {
-        "query": query,
-        "mode": "artlist",
-        "format": "json",
-        "maxrecords": maxrecords,
-        "sort": "datedesc",
-    }
-    for _ in range(4):
-        r = requests.get(GDELT_URL, params=params, timeout=25)
-        if r.status_code == 200:
-            try:
-                return r.json()
-            except Exception:
-                pass
-        time.sleep(5)
-    return {"articles": []}
+# ========= 유틸 =========
+def slugify(text: str) -> str:
+    t = (text or "").lower()
+    t = re.sub(r"[^a-z0-9\- ]+", "", t)
+    t = re.sub(r"\s+", "-", t).strip("-")
+    return t[:80] or "post"
 
-def slugify(text: str):
-    text = (text or "post").lower()
-    text = re.sub(r"[^a-z0-9\- ]+", "", text)
-    text = re.sub(r"\s+", "-", text).strip("-")
-    return text[:80] or "post"
+def strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text or "")
 
-def strip_html_tags(html: str) -> str:
-    return re.sub(r"<[^>]+>", "", html or "")
+def placeholder_image_url(seed: str | int) -> str:
+    # 저작권 부담 없는 placeholder(랜덤). OG 권장 비율(1200x630).
+    # seed는 날짜/제목 기반으로 다양화
+    return f"https://picsum.photos/seed/{seed}/1200/630"
 
-def plain_len(html: str) -> int:
-    return len(strip_html_tags(html))
-
-# ===== 프롬프트 =====
-PROMPT_SYSTEM = (
-    "You are a financial journalist and SEO editor.\n"
-    "Write in **clear American English** with **Grade 7–8 readability**.\n"
-    "Prefer short sentences. Avoid jargon and complex words."
-)
-
-def build_prompt(articles, query, char_limit):
-    bullets = []
-    for a in articles[:MAX_RECORDS]:
-        t = a.get("title") or ""
-        s = (a.get("seendate") or "")[:10]
-        u = a.get("url") or ""
-        bullets.append(f"- {s} | {t} | {u}")
-    joined = "\n".join(bullets) if bullets else "(no articles)";
-
+# ========= OpenAI: 기사 생성 =========
+def build_prompt():
+    system = (
+        "You are an SEO-savvy U.S. stocks blogger. "
+        "Write in plain, simple American English (grade 7–8). "
+        "Be factual, neutral, and helpful. No real-time prices."
+    )
     user = f"""
-Create a Google‑SEO‑optimized blog post in ENGLISH about: **{query}**.
+Write a Google-SEO-optimized blog post in ENGLISH about the U.S. stock market.
 
-Use the sources list (recent items from GDELT):
-{joined}
+Authoring rules (must follow):
+- Topic must be U.S. equities (100%).
+- Start with 4–6 short lines that summarize the core ideas (Key Highlights).
+- Body length target (plain text, excluding tags): {TARGET_MIN}–{TARGET_MAX} characters.
+- Avoid hype and jargon; keep sentences short.
+- No invented data or precise live quotes; keep it educational and evergreen.
+- Include 1 hero image placeholder location in the HTML (<figure> with <img> but keep src as {{HERO_URL}}).
+- Use semantic HTML only, no inline CSS.
 
-Return a single JSON with:
-- title: SEO H1 (<= 70 chars, include the core keyword naturally)
-- meta_description: ~150 chars, enticing, no clickbait
-- keywords: 8-12 SEO keywords as a comma-separated string
-- outline: 5-8 headings (mix of H2/H3 strings)
-- hero_alt: short alt text for the hero image
-- image_style: short image style guide (e.g., "flat illustration, warm palette")
-- body_html: FULL article body as clean semantic HTML (no inline CSS)
-  Rules:
-  * Grade 7–8 vocabulary, short sentences, neutral and factual tone
-  * Start with a short lede paragraph
-  * Follow the outline using <h2>/<h3>, then <p>, <ul>/<ol> as needed
-  * Include a 'Key Takeaways' box as a bullet list
-  * Add a 'Sources' section with a <ul> of the source URLs above
-  * Keep plain-text length **<= {char_limit} characters** (exclude HTML tags)
-  * Do not include external scripts or CSS
+Output JSON with:
+{{
+  "title": "H1 (<= 65 chars, include a core keyword)",
+  "meta_description": "one sentence ~150 chars",
+  "keywords": "8–12 comma-separated SEO keywords",
+  "body_html": "<section>...</section> (HTML only, includes headings and lists)"
+}}
+
+Body structure guidelines:
+- <p class="lede"> one-sentence hook
+- A 'Key Highlights' box as a short <ul> (4–6 bullets)
+- 3–6 sections with <h2>/<h3> and short paragraphs
+- A simple conclusion section
+
+Return JSON only.
 """
-    return user
+    return system, user
 
-# ===== 생성 =====
-def generate_article(articles, query, char_limit):
-    user = build_prompt(articles, query, char_limit)
+def generate_article():
+    sys, usr = build_prompt()
     resp = client.chat.completions.create(
         model=MODEL_TEXT,
-        messages=[
-            {"role": "system", "content": PROMPT_SYSTEM},
-            {"role": "user", "content": user},
-        ],
+        messages=[{"role":"system","content":sys},
+                  {"role":"user","content":usr}],
         temperature=0.4,
     )
     raw = resp.choices[0].message.content.strip()
+    # 코드펜스 제거
     raw = re.sub(r"^```(json)?\s*|\s*```$", "", raw, flags=re.S)
     data = json.loads(raw)
 
-    # 안전장치: 길이가 넘치면 모델에게 한 번 더 축약 요청
-    body_html = data.get("body_html", "")
-    if plain_len(body_html) > CHAR_LIMIT:
-        body_html = shorten_with_model(body_html, CHAR_LIMIT)
-        data["body_html"] = body_html
+    # 길이 보정(너무 길거나 짧으면 살짝 조정)
+    plain_len = len(strip_html(data.get("body_html","")))
+    if plain_len < TARGET_MIN or plain_len > TARGET_MAX:
+        goal = (TARGET_MIN + TARGET_MAX)//2
+        fix = client.chat.completions.create(
+            model=MODEL_TEXT,
+            messages=[
+                {"role":"system","content":"You carefully edit HTML while preserving structure and semantics."},
+                {"role":"user","content":f"Revise this HTML to ~{goal} characters (plain text). Keep headings and lists.\n\n{data.get('body_html','')}"},
+            ],
+            temperature=0.2,
+        )
+        fixed_html = fix.choices[0].message.content.strip()
+        data["body_html"] = fixed_html
+
     return data
 
-def shorten_with_model(html_body: str, char_limit: int) -> str:
-    msg = (
-        f"Rewrite the following HTML article so the **plain-text** length is <= {char_limit} characters. "
-        "Keep headings and lists. Use Grade 7–8 vocabulary and short sentences. Return only HTML."
+# ========= Blogger API 호출 =========
+def get_access_token() -> str:
+    r = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "refresh_token": REFRESH_TOKEN,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
     )
-    resp = client.chat.completions.create(
-        model=MODEL_TEXT,
-        messages=[
-            {"role": "system", "content": "You are a concise copy editor."},
-            {"role": "user", "content": msg + "\n\n" + html_body},
-        ],
-        temperature=0.2,
-    )
-    html2 = resp.choices[0].message.content.strip()
-    html2 = re.sub(r"^```(html)?\s*|\s*```$", "", html2, flags=re.S)
-    # 최종 길이 확인 후 초과 시 아주 약하게 자르기(안전망)
-    text_len = plain_len(html2)
-    if text_len > char_limit:
-        txt = strip_html_tags(html2)
-        txt = txt[:char_limit]
-        # 최소 래퍼만 붙여 간단히 감싸줌
-        html2 = f"<section><p>{txt}</p></section>"
-    return html2
+    if r.status_code != 200:
+        raise SystemExit(f"❌ Token refresh failed: {r.status_code} {r.text}")
+    return r.json()["access_token"]
 
-def generate_image(prompt_text: str) -> str:
-    p = (
-        f"Hero image for a blog post about: {prompt_text}. "
-        "No text. minimal, modern, editorial, data theme."
-    )
-    img = client.images.generate(model=MODEL_IMAGE, prompt=p, size="1024x1024")
-    return img.data[0].url
+def post_to_blogger(title: str, html: str) -> dict:
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+    body = {
+        "kind": "blogger#post",
+        "blog": {"id": BLOG_ID},
+        "title": title,
+        "content": html,
+        # 필요 시 라벨 사용:
+        # "labels": ["US Stocks","AutoPost"],
+    }
+    url = f"https://www.googleapis.com/blogger/v3/blogs/{BLOG_ID}/posts/"
+    r = requests.post(url, headers=headers, data=json.dumps(body).encode("utf-8"), timeout=60)
+    if r.status_code not in (200, 201):
+        raise SystemExit(f"❌ Blogger post failed: {r.status_code} {r.text}")
+    return r.json()
 
-def render_html(meta: dict, hero_url: str) -> str:
-    title = meta.get("title", "Article")
-    meta_desc = meta.get("meta_description", "")
-    keywords = meta.get("keywords", "")
-    hero_alt = meta.get("hero_alt", "blog hero")
-    body_html = meta.get("body_html", "")
+# ========= HTML 렌더 =========
+def render_full_html(meta: dict, hero_url: str) -> str:
+    title = meta["title"].strip()
+    meta_desc = meta["meta_description"].strip()
+    keywords = meta.get("keywords","").strip()
+    body = meta["body_html"]
 
-    html = f"""<!doctype html>
+    # body 안의 {{HERO_URL}} 치환(프롬프트에서 figure 자리 마련)
+    body = body.replace("{{HERO_URL}}", hero_url)
+
+    return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -169,34 +172,34 @@ def render_html(meta: dict, hero_url: str) -> str:
 <body>
   <article>
     <h1>{title}</h1>
-    <figure><img src="{hero_url}" alt="{hero_alt}"></figure>
-    {body_html}
+    <figure><img src="{hero_url}" alt="U.S. stock market hero image"></figure>
+    {body}
   </article>
 </body>
 </html>"""
-    return html
 
-# ===== 메인 =====
+# ========= 메인 =========
 def main():
-    data = fetch_gdelt(QUERY, MAX_RECORDS)
-    articles = data.get("articles", [])
-    if not articles:
-        print("No articles fetched from GDELT. Exiting.")
-        return
+    # 1) 글 생성
+    meta = generate_article()
 
-    meta = generate_article(articles, QUERY, CHAR_LIMIT)
+    # 2) 무료 이미지 URL(저작권 안전)
+    seed = f"{dt.datetime.utcnow():%Y%m%d}-{random.randint(1000,9999)}"
+    hero_url = placeholder_image_url(seed)
 
-    # 이미지 프롬프트는 간결하게: image_style이 있으면 우선 사용
-    seed = meta.get("image_style") or meta.get("title") or QUERY
-    hero_url = generate_image(seed)
-
-    slug = slugify(meta.get("title", "post"))
+    # 3) HTML 저장
+    slug = slugify(meta["title"])
     date_str = dt.datetime.utcnow().strftime("%Y-%m-%d")
-    out_path = OUT_DIR / f"{date_str}-{slug}.html"
+    html_doc = render_full_html(meta, hero_url)
 
-    html_doc = render_html(meta, hero_url)
+    out_path = OUT_DIR / f"{date_str}-{slug}.html"
     out_path.write_text(html_doc, encoding="utf-8")
-    print(f"✅ Saved: {out_path} (plain length={plain_len(meta.get('body_html',''))})")
+    print(f"✅ Saved: {out_path}")
+
+    # 4) 블로그에 게시(공개)
+    res = post_to_blogger(meta["title"], html_doc)
+    post_url = res.get("url") or res.get("selfLink") or "(no url)"
+    print("✅ Published:", post_url)
 
 if __name__ == "__main__":
     main()
